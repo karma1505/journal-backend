@@ -3,6 +3,7 @@ uvicorn[standard]
 pydantic
 requests
 sqlalchemy
-aiosqlite
-psycopg2-binary
+asyncpg
 python-multipart
+supabase
+httpx
