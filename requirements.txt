@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+requests
+sqlalchemy
+aiosqlite
+psycopg2-binary
+python-multipart
