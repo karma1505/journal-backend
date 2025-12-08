@@ -26,6 +26,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000", 
         "http://127.0.0.1:3000",
+        "https://journal.karmanya.dev",  # Custom domain
         "https://journal-frontend-nk9hrrr8p-karma1505s-projects.vercel.app",
         "https://journal-frontend-swart.vercel.app",
         "https://journal-frontend-beta.vercel.app",
