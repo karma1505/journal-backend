@@ -1,16 +1,18 @@
 
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from models import Entry as EntryModel
+from sqlalchemy import and_
+from models import Entry as EntryModel, EntryView as EntryViewModel
 from database import SessionLocal, engine
 import os
 import uuid
-from datetime import datetime
+import hashlib
+from datetime import datetime, timedelta
 from supabase import create_client, Client
 
 app = FastAPI(title="Personal Journal API")
@@ -52,8 +54,60 @@ class EntryRead(BaseModel):
     content: str
     created_at: datetime
     image_path: Optional[str] = None
+    view_count: int = 0
     class Config:
         from_attributes = True
+
+def get_client_ip(request: Request) -> str:
+    """Extract client IP address, handling proxies and load balancers"""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client else "unknown"
+
+def hash_ip(ip_address: str) -> str:
+    """Hash IP address using SHA-256 for privacy"""
+    return hashlib.sha256(ip_address.encode()).hexdigest()
+
+async def track_view(entry_id: int, ip_address: str, db: AsyncSession) -> bool:
+    """Track a view for an entry. Returns True if view was counted, False if duplicate."""
+    ip_hash_value = hash_ip(ip_address)
+    time_threshold = datetime.utcnow() - timedelta(hours=24)
+    
+    # Check if this IP has viewed this entry in the last 24 hours
+    query = select(EntryViewModel).where(
+        and_(
+            EntryViewModel.entry_id == entry_id,
+            EntryViewModel.ip_hash == ip_hash_value,
+            EntryViewModel.viewed_at > time_threshold
+        )
+    )
+    result = await db.execute(query)
+    existing_view = result.scalar_one_or_none()
+    
+    if existing_view:
+        return False  # Already viewed recently
+    
+    # Record the new view
+    new_view = EntryViewModel(
+        entry_id=entry_id,
+        ip_hash=ip_hash_value,
+        viewed_at=datetime.utcnow()
+    )
+    db.add(new_view)
+    
+    # Increment view count
+    entry_query = select(EntryModel).where(EntryModel.id == entry_id)
+    entry_result = await db.execute(entry_query)
+    entry = entry_result.scalar_one_or_none()
+    if entry:
+        entry.view_count += 1
+    
+    await db.commit()
+    return True
 
 async def get_db():
     session = None
@@ -200,29 +254,24 @@ async def create_entry(
     return db_entry
 
 @app.get("/entries/{entry_id}", response_model=EntryRead)
-def get_entry(entry_id: int):
+async def get_entry(entry_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     try:
-        import requests
+        # Fetch entry from database
+        query = select(EntryModel).where(EntryModel.id == entry_id)
+        result = await db.execute(query)
+        entry = result.scalar_one_or_none()
         
-        supabase_url = os.getenv("SUPABASE_URL", "https://sginmhviemnhjorlzbme.supabase.co")
-        supabase_key = os.getenv("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNnaW5taHZpZW1uaGpvcmx6Ym1lIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkxNjgxNDIsImV4cCI6MjA3NDc0NDE0Mn0.nlTC3Q2AUogT3lLo685JAs14JV9DC-8CPE_4g2lGJ8E")
+        if not entry:
+            raise HTTPException(status_code=404, detail="Entry not found.")
         
-        response = requests.get(
-            f"{supabase_url}/rest/v1/entries?id=eq.{entry_id}",
-            headers={
-                "apikey": supabase_key,
-                "Authorization": f"Bearer {supabase_key}",
-                "Content-Type": "application/json"
-            }
-        )
+        # Track the view (async, won't block response)
+        client_ip = get_client_ip(request)
+        await track_view(entry_id, client_ip, db)
         
-        if response.status_code == 200:
-            entries = response.json()
-            if not entries:
-                raise HTTPException(status_code=404, detail="Entry not found.")
-            return entries[0]
-        else:
-            raise HTTPException(status_code=500, detail="Failed to fetch entry")
+        # Refresh entry to get updated view_count
+        await db.refresh(entry)
+        
+        return entry
             
     except HTTPException:
         raise

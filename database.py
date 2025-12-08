@@ -21,7 +21,8 @@ try:
         connect_args={
             "server_settings": {
                 "application_name": "journal_api",
-            }
+            },
+            "statement_cache_size": 0  # Fix for pgbouncer compatibility
         }
     )
     SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
